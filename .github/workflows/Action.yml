@@ -1,4 +1,4 @@
-name: Android Kernel Build - ARM64
+name: Android Kernel Build - ARM64 (Clang Fixed)
 
 on:
   push:
@@ -21,18 +21,16 @@ on:
         default: 'ranchu64_defconfig'
 
 env:
-  # 从 build.config.aarch64.txt 提取的关键配置
   KERNEL_ARCH: arm64
-  CLANG_TRIPLE: aarch64-linux-gnu-
-  CROSS_COMPILE_PREFIX: aarch64-linux-android-
-  GCC_VERSION: 4.9
+  CLANG_VERSION: r487747c  # Android 13 标准 Clang 版本，完美支持 Cortex-A76/A55
+  GCC_VERSION: 10          # 仅用于提供 binutils (objcopy/strip 等)
   DEFCONFIG: ${{ github.event.inputs.defconfig_name || 'ranchu64_defconfig' }}
   OUTPUT_DIR: out
-  ARTIFACT_NAME: kernel-artifacts-${{ github.run_number }}-${{ github.sha }}
+  ARTIFACT_NAME: kernel-${{ github.run_number }}-${{ github.sha }}
 
 jobs:
   build:
-    name: Build ARM64 Kernel
+    name: Build ARM64 Kernel with Clang
     runs-on: ubuntu-22.04
     timeout-minutes: 120
 
@@ -43,120 +41,159 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # 修复 Node.js 警告
 
       # =============== 2. 安装系统依赖 ===============
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            flex \
-            bison \
-            libssl-dev \
-            libelf-dev \
-            libncurses-dev \
-            libncurses5-dev \
-            wget \
-            curl \
-            git \
-            unzip \
-            zip \
-            python3 \
-            python3-pip \
-            ccache
+            build-essential flex bison libssl-dev libelf-dev \
+            libncurses-dev libncurses5-dev wget curl git unzip zip \
+            python3 python3-pip ccache bc liblz4-tool
 
-      # =============== 3. 下载 GCC 4.9 工具链 (关键步骤) ===============
-      - name: Clone GCC 4.9 Toolchain
+      # =============== 3. 下载 Clang 工具链 (核心修复) ===============
+      - name: Clone Clang Toolchain (r487747c)
+        run: |
+          mkdir -p prebuilts/clang/host/linux-x86
+          git clone --depth=1 -b ${{ env.CLANG_VERSION }} \
+            https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86.git \
+            prebuilts/clang/host/linux-x86/clang-${{ env.CLANG_VERSION }}
+          echo "✅ Clang ${CLANG_VERSION} installed"
+          ls -lh prebuilts/clang/host/linux-x86/clang-${{ env.CLANG_VERSION }}/bin/ | head -5
+
+      # =============== 4. 下载 GCC 10 工具链 (仅提供 binutils) ===============
+      - name: Clone GCC 10 Toolchain (for binutils only)
         run: |
           mkdir -p prebuilts/gcc/linux-x86/aarch64
           git clone --depth=1 \
-            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
-            prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-${GCC_VERSION}
-          # 验证工具链
-          ls -lh prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-${GCC_VERSION}/bin/
-          echo "Toolchain installed successfully"
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-10.git \
+            prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-${{ env.GCC_VERSION }}
+          echo "✅ GCC ${GCC_VERSION} binutils installed (for objcopy/strip only)"
 
-      # =============== 4. 设置环境变量 ===============
+      # =============== 5. 配置编译环境 (关键修复) ===============
       - name: Configure Build Environment
         run: |
-          # 设置 PATH (关键：使 make 能找到交叉编译工具)
-          echo "${{ github.workspace }}/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-${GCC_VERSION}/bin" >> $GITHUB_PATH
+          # 优先使用 Clang (PATH 顺序决定工具优先级)
+          echo "${{ github.workspace }}/prebuilts/clang/host/linux-x86/clang-${{ env.CLANG_VERSION }}/bin" >> $GITHUB_PATH
+          echo "${{ github.workspace }}/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-${{ env.GCC_VERSION }}/bin" >> $GITHUB_PATH
           
-          # 设置编译参数 (与 build.config.aarch64.txt 严格对应)
+          # 设置 Clang 专用编译参数 (解决 Cortex-A76 识别问题)
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "AS=clang" >> $GITHUB_ENV
+          echo "LD=ld.lld" >> $GITHUB_ENV
+          echo "AR=llvm-ar" >> $GITHUB_ENV
+          echo "NM=llvm-nm" >> $GITHUB_ENV
+          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
+          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
+          echo "STRIP=llvm-strip" >> $GITHUB_ENV
+          
+          # 架构与交叉编译参数
           echo "ARCH=${KERNEL_ARCH}" >> $GITHUB_ENV
-          echo "CLANG_TRIPLE=${CLANG_TRIPLE}" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=${CROSS_COMPILE_PREFIX}" >> $GITHUB_ENV
-          echo "KBUILD_BUILD_USER=GitHubActions" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-android-" >> $GITHUB_ENV
+          
+          # 构建元数据
+          echo "KBUILD_BUILD_USER=GH-Actions" >> $GITHUB_ENV
           echo "KBUILD_BUILD_HOST=ci-builder" >> $GITHUB_ENV
           
-          # 启用 ccache (显著加速重复编译)
+          # 启用 ccache
           echo "USE_CCACHE=1" >> $GITHUB_ENV
-          ccache --max-size=5.0G
+          ccache --max-size=8.0G
           echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
+          
+          # 验证关键工具
+          echo "=== Toolchain Verification ==="
+          which clang && clang --version | head -2
+          which ld.lld && ld.lld --version
+          which ${CROSS_COMPILE}objcopy && ${CROSS_COMPILE}objcopy --version | head -1
 
-      # =============== 5. 验证工具链 ===============
-      - name: Verify Toolchain Availability
-        run: |
-          which ${CROSS_COMPILE_PREFIX}gcc
-          ${CROSS_COMPILE_PREFIX}gcc --version | head -n 3
-          echo "Toolchain verified: ${CROSS_COMPILE_PREFIX}gcc"
-
-      # =============== 6. 内核配置与编译 ===============
+      # =============== 6. 内核配置 ===============
       - name: Configure Kernel
         run: |
+          echo "🔧 Configuring kernel with defconfig: ${DEFCONFIG}"
           make O=${OUTPUT_DIR} ${DEFCONFIG}
-          # 可选：根据构建类型调整配置
+          
+          # 调试构建增强
           if [ "${{ github.event.inputs.build_type }}" == "debug" ]; then
-            scripts/config --file ${OUTPUT_DIR}/.config -e DEBUG_KERNEL -e DEBUG_INFO
+            scripts/config --file ${OUTPUT_DIR}/.config -e DEBUG_KERNEL -e DEBUG_INFO -e FRAME_POINTER
             make O=${OUTPUT_DIR} olddefconfig
-            echo "🔧 Debug build: Enabled kernel debug options"
+            echo "✅ Debug options enabled"
           fi
 
-      - name: Build Kernel
+      # =============== 7. 编译内核 (核心修复) ===============
+      - name: Build Kernel with Clang
         run: |
-          echo "Starting kernel build with:"
-          echo "  ARCH=${ARCH}"
-          echo "  CROSS_COMPILE=${CROSS_COMPILE}"
-          echo "  Output directory: ${OUTPUT_DIR}"
+          echo "🚀 Starting kernel build..."
+          echo "   ARCH=${ARCH}"
+          echo "   CC=${CC}"
+          echo "   LD=${LD}"
+          echo "   CLANG_TRIPLE=${CLANG_TRIPLE}"
+          echo "   CROSS_COMPILE=${CROSS_COMPILE}"
           
-          # 执行编译 (使用所有可用核心)
+          # 执行编译 (关键：显式指定 Clang 工具链参数)
           make -j$(nproc) O=${OUTPUT_DIR} \
             ARCH=${ARCH} \
+            CC=${CC} \
+            AS=${AS} \
+            LD=${LD} \
+            AR=${AR} \
+            NM=${NM} \
+            OBJCOPY=${OBJCOPY} \
+            OBJDUMP=${OBJDUMP} \
+            STRIP=${STRIP} \
+            CLANG_TRIPLE=${CLANG_TRIPLE} \
             CROSS_COMPILE=${CROSS_COMPILE}
           
-          # 验证关键产物是否存在
+          # 严格验证产物
+          echo "🔍 Verifying build artifacts..."
           if [ ! -f ${OUTPUT_DIR}/arch/${KERNEL_ARCH}/boot/Image.gz ]; then
-            echo "❌ ERROR: Image.gz not found!"
-            ls -lh ${OUTPUT_DIR}/arch/${KERNEL_ARCH}/boot/ || true
+            echo "❌ FATAL: Image.gz not found!"
+            ls -lh ${OUTPUT_DIR}/arch/${KERNEL_ARCH}/boot/ 2>/dev/null || echo "Boot directory empty"
             exit 1
           fi
           if [ ! -f ${OUTPUT_DIR}/vmlinux ]; then
-            echo "❌ ERROR: vmlinux not found!"
+            echo "❌ FATAL: vmlinux not found!"
             exit 1
           fi
-          echo "✅ Kernel build completed successfully"
+          if [ ! -f ${OUTPUT_DIR}/System.map ]; then
+            echo "❌ FATAL: System.map not found!"
+            exit 1
+          fi
+          echo "✅ All required artifacts generated successfully"
 
-      # =============== 7. 收集构建产物 ===============
+      # =============== 8. 收集产物 ===============
       - name: Prepare Artifacts
         run: |
           mkdir -p artifacts
           
-          # 复制 build.config.aarch64.txt 指定的关键文件
+          # 复制核心文件 (严格遵循 build.config.aarch64.txt)
           cp ${OUTPUT_DIR}/arch/${KERNEL_ARCH}/boot/Image.gz artifacts/
           cp ${OUTPUT_DIR}/vmlinux artifacts/
           cp ${OUTPUT_DIR}/System.map artifacts/
           
-          # 附加有用信息
-          echo "Build completed at $(date)" > artifacts/BUILD_INFO.txt
-          echo "Commit: ${{ github.sha }}" >> artifacts/BUILD_INFO.txt
-          echo "Defconfig: ${DEFCONFIG}" >> artifacts/BUILD_INFO.txt
-          echo "Build type: ${{ github.event.inputs.build_type || 'release' }}" >> artifacts/BUILD_INFO.txt
-          make -C ${OUTPUT_DIR} kernelrelease >> artifacts/BUILD_INFO.txt
+          # 附加构建信息
+          cat > artifacts/BUILD_INFO.txt <<EOF
+Kernel Build Report
+===================
+Build Date: $(date)
+GitHub Run: #${{ github.run_number }}
+Commit SHA: ${{ github.sha }}
+Branch: ${{ github.ref_name }}
+Defconfig: ${DEFCONFIG}
+Build Type: ${{ github.event.inputs.build_type || 'release' }}
+Toolchain: Clang ${CLANG_VERSION} + GCC ${GCC_VERSION} (binutils)
+Kernel Version: $(make -C ${OUTPUT_DIR} kernelrelease 2>/dev/null || echo "N/A")
+Architecture: ${KERNEL_ARCH}
+EOF
           
-          # 创建校验和
+          # 生成校验和
           cd artifacts && sha256sum * > SHA256SUMS
+          echo "📦 Artifacts prepared:"
+          ls -lh artifacts/
 
-      # =============== 8. 上传产物到 GitHub ===============
+      # =============== 9. 上传产物 ===============
       - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -165,7 +202,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      # =============== 9. (可选) 发布到 Release ===============
+      # =============== 10. (可选) 发布到 Release ===============
       - name: Create GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
@@ -175,16 +212,24 @@ jobs:
           name: "Kernel Release ${{ github.ref_name }}"
           body: |
             Automated kernel build from tag `${{ github.ref_name }}`
+            
+            **Build Configuration:**
             - Architecture: ARM64
-            - Toolchain: GCC ${GCC_VERSION}
-            - Defconfig: `${{ env.DEFCONFIG }}`
-            - Build type: `${{ github.event.inputs.build_type || 'release' }}`
+            - Toolchain: Clang ${{ env.CLANG_VERSION }} (primary) + GCC ${{ env.GCC_VERSION }} (binutils)
+            - Defconfig: \`${{ env.DEFCONFIG }}\`
+            - Build Type: \`${{ github.event.inputs.build_type || 'release' }}\`
+            - Kernel Version: $(cat artifacts/BUILD_INFO.txt | grep "Kernel Version" | cut -d: -f2 | xargs)
+            
+            **Artifacts:**
+            - `Image.gz`: Compressed kernel image
+            - `vmlinux`: Unstripped kernel (for debugging)
+            - `System.map`: Kernel symbol table
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # =============== 10. 清理 (节省 runner 空间) ===============
+      # =============== 11. 清理 ===============
       - name: Cleanup Workspace
         if: always()
         run: |
           rm -rf ${OUTPUT_DIR} prebuilts .ccache
-          echo "Workspace cleaned"
+          echo "🧹 Workspace cleaned"
