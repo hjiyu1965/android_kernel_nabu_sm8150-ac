@@ -1,90 +1,109 @@
-steps:
+name: Build Kernel
 
-- name: Checkout source
-  uses: actions/checkout@v4
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: 'Defconfig file (e.g., defconfig)'
+        required: true
+        default: 'defconfig'
+      kernel_name:
+        description: 'Kernel zip name (without .zip)'
+        required: true
+        default: 'AnyKernel3'
 
-- name: Install dependencies
-  run: |
-    sudo apt update
-    sudo apt install -y \
-    bc \
-    bison \
-    build-essential \
-    ccache \
-    curl \
-    flex \
-    git \
-    libssl-dev \
-    libncurses5-dev \
-    lzop \
-    python3 \
-    unzip \
-    wget \
-    zip
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      DEFCONFIG: ${{ github.event.inputs.defconfig || 'defconfig' }}
+      KERNEL_NAME: ${{ github.event.inputs.kernel_name || 'AnyKernel3' }}
 
-- name: Setup ccache
-  uses: actions/cache@v4
-  with:
-    path: ~/.ccache
-    key: ${{ runner.os }}-ccache-${{ github.sha }}
-    restore-keys: |
-      ${{ runner.os }}-ccache-
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
 
-- name: Download Clang
-  run: |
-    git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            curl \
+            flex \
+            git \
+            libssl-dev \
+            libncurses5-dev \
+            lzop \
+            python3 \
+            unzip \
+            wget \
+            zip
 
-- name: Add KernelSU (optional)
-  run: |
-    curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -
-  continue-on-error: true
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
 
-- name: Clone AnyKernel3
-  run: |
-    git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+      - name: Download Clang
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
 
-- name: Start timer
-  run: |
-    echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
+      - name: Add KernelSU (optional)
+        run: |
+          curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -
+        continue-on-error: true
 
-- name: Build kernel
-  run: |
-    export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+      - name: Clone AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
 
-    make O=out ARCH=arm64 $DEFCONFIG
+      - name: Start timer
+        run: |
+          echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
 
-    make -j$(nproc --all) \
-    O=out \
-    ARCH=arm64 \
-    CC=clang \
-    CROSS_COMPILE=aarch64-linux-gnu- \
-    CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+      - name: Build kernel
+        run: |
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          make O=out ARCH=arm64 $DEFCONFIG
+          make -j$(nproc --all) \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-- name: Copy kernel
-  run: |
-    cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+      - name: Copy kernel
+        run: |
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
 
-- name: Build zip
-  run: |
-    cd AnyKernel3
-    zip -r9 $KERNEL_NAME.zip *
+      - name: Build zip
+        run: |
+          cd AnyKernel3
+          zip -r9 $KERNEL_NAME.zip *
 
-- name: Stop timer
-  run: |
-    echo "BUILD_END=$(date +%s)" >> $GITHUB_ENV
+      - name: Stop timer
+        run: |
+          echo "BUILD_END=$(date +%s)" >> $GITHUB_ENV
 
-- name: Upload Artifact
-  uses: actions/upload-artifact@v4
-  with:
-    name: Kernel
-    path: AnyKernel3/*.zip
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel
+          path: AnyKernel3/*.zip
 
-- name: Create Release
-  uses: softprops/action-gh-release@v2
-  with:
-    tag_name: build-${{ github.run_number }}
-    name: Kernel Build
-    files: AnyKernel3/*.zip
-  env:
-    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Kernel Build
+          files: AnyKernel3/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
