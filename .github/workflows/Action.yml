@@ -1,4 +1,5 @@
 name: Android Kernel Build - ARM64 (Clang Fixed)
+
 on:
   push:
     branches: [main, master]
@@ -16,15 +17,17 @@ on:
         description: "Defconfig 名称"
         required: false
         default: "ranchu64_defconfig"
+
 env:
   KERNEL_ARCH: arm64
-  CLANG_VERSION: r487747c
+  CLANG_VERSION: r487747
   GCC_VERSION: 10
   # 补充兜底逻辑，非手动触发时使用默认值
   DEFCONFIG: ${{ github.event.inputs.defconfig_name || 'ranchu64_defconfig' }}
   BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
   OUTPUT_DIR: out
   ARTIFACT_NAME: kernel-artifacts
+
 jobs:
   build:
     name: Build ARM64 Kernel
@@ -46,7 +49,6 @@ jobs:
             libncurses-dev libncurses5-dev wget curl git unzip zip python3 ccache bc liblz4-tool
           sudo apt-get install -y po4a
 
-      # 核心修复：配置git全局凭证，解决GitHub克隆认证问题
       - name: Configure Git Global Credential
         run: |
           git config --global url."https://oauth2:${{ secrets.GITHUB_TOKEN }}@github.com".insteadOf "https://github.com"
@@ -54,11 +56,11 @@ jobs:
 
       - name: Clone Clang Toolchain
         run: |
-          mkdir -p prebuilts/clang/host/linux-x86
-          git clone --depth=1 -b ${{ env.CLANG_VERSION }} \
-            https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86.git \
+          mkdir -p prebuilts/clang/host/linux-x86/clang-$CLANG_VERSION
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
             prebuilts/clang/host/linux-x86/clang-$CLANG_VERSION
-          echo "Clang $CLANG_VERSION installed"
+          echo "Clang toolchain cloned from AOSP"
 
       - name: Clone GCC 10 Toolchain
         run: |
@@ -70,10 +72,8 @@ jobs:
 
       - name: Configure Environment
         run: |
-          # 修正路径大小写错误
           echo "${{ github.workspace }}/prebuilts/clang/host/linux-x86/clang-$CLANG_VERSION/bin" >> $GITHUB_PATH
           echo "${{ github.workspace }}/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-$GCC_VERSION/bin" >> $GITHUB_PATH
-          # 修正所有"G不平衡"拼写错误，统一使用正确的$GITHUB_ENV
           echo "CC=clang" >> $GITHUB_ENV
           echo "LD=ld.lld" >> $GITHUB_ENV
           echo "AR=llvm-ar" >> $GITHUB_ENV
@@ -127,11 +127,9 @@ jobs:
       - name: Prepare Artifacts
         run: |
           mkdir -p artifacts
-          # 复制核心文件
           cp $OUTPUT_DIR/arch/$KERNEL_ARCH/boot/Image.gz artifacts/
           cp $OUTPUT_DIR/vmlinux artifacts/
           cp $OUTPUT_DIR/System.map artifacts/
-          # 生成构建信息
           {
             echo "Automated kernel build from tag `$GITHUB_REF_NAME`"
             echo ""
@@ -147,7 +145,6 @@ jobs:
             echo "- `vmlinux`: Unstripped kernel (for debugging)"
             echo "- `System.map`: Kernel symbol table"
           } > artifacts/BUILD_INFO.md
-          # 生成校验和
           cd artifacts && sha256sum * > SHA256SUMS
 
       - name: Upload Artifacts
@@ -161,9 +158,7 @@ jobs:
       - name: Generate Release Notes
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
-          # 提取内核版本号
           KERNEL_VERSION=$(make -C $OUTPUT_DIR kernelrelease 2>/dev/null || echo "Unknown")
-          # 使用安全的方式生成Markdown文件
           {
             echo "Automated kernel build from tag `$GITHUB_REF_NAME`"
             echo ""
