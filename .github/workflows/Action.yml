@@ -202,7 +202,31 @@ EOF
           retention-days: 30
           if-no-files-found: error
 
-      # =============== 10. (可选) 发布到 Release ===============
+      # =============== 10. (可选) 生成 Release 说明文件 ===============
+      - name: Generate Release Notes
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          # 提取内核版本号
+          KERNEL_VERSION=$(make -C ${OUTPUT_DIR} kernelrelease 2>/dev/null || echo "Unknown")
+          
+          # 创建 Markdown 文件
+          cat > RELEASE_BODY.md <<EOF
+Automated kernel build from tag \`${{ github.ref_name }}\`
+
+**Build Configuration:**
+- Architecture: ARM64
+- Toolchain: Clang ${{ env.CLANG_VERSION }} (primary) + GCC ${{ env.GCC_VERSION }} (binutils)
+- Defconfig: \`${{ env.DEFCONFIG }}\`
+- Build Type: \`${{ github.event.inputs.build_type || 'release' }}\`
+- Kernel Version: \${KERNEL_VERSION}
+
+**Artifacts:**
+- \`Image.gz\`: Compressed kernel image
+- \`vmlinux\`: Unstripped kernel (for debugging)
+- \`System.map\`: Kernel symbol table
+EOF
+
+      # =============== 11. 发布到 Release ===============
       - name: Create GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
@@ -210,24 +234,11 @@ EOF
           files: artifacts/*
           tag_name: ${{ github.ref_name }}
           name: "Kernel Release ${{ github.ref_name }}"
-          body: |
-            Automated kernel build from tag `${{ github.ref_name }}`
-            
-            **Build Configuration:**
-            - Architecture: ARM64
-            - Toolchain: Clang ${{ env.CLANG_VERSION }} (primary) + GCC ${{ env.GCC_VERSION }} (binutils)
-            - Defconfig: \`${{ env.DEFCONFIG }}\`
-            - Build Type: \`${{ github.event.inputs.build_type || 'release' }}\`
-            - Kernel Version: $(cat artifacts/BUILD_INFO.txt | grep "Kernel Version" | cut -d: -f2 | xargs)
-            
-            **Artifacts:**
-            - `Image.gz`: Compressed kernel image
-            - `vmlinux`: Unstripped kernel (for debugging)
-            - `System.map`: Kernel symbol table
+          body_path: RELEASE_BODY.md # 使用上一步生成的文件
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # =============== 11. 清理 ===============
+      # =============== 12. 清理 ===============
       - name: Cleanup Workspace
         if: always()
         run: |
