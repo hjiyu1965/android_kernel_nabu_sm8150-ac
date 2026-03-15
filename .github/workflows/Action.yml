@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Android Kernel (goldfish+arm64)
 
 on:
   push:
@@ -6,20 +6,24 @@ on:
   workflow_dispatch:
     inputs:
       defconfig:
-        description: 'Defconfig file (e.g., defconfig)'
+        description: 'Defconfig file'
         required: true
-        default: 'defconfig'
-      kernel_name:
-        description: 'Kernel zip name (without .zip)'
+        default: 'ranchu64_defconfig'
+      kernel_dir:
+        description: 'Kernel source subdirectory'
         required: true
-        default: 'AnyKernel3'
+        default: 'common'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      DEFCONFIG: ${{ github.event.inputs.defconfig || 'defconfig' }}
-      KERNEL_NAME: ${{ github.event.inputs.kernel_name || 'AnyKernel3' }}
+      ARCH: arm64
+      CROSS_COMPILE: aarch64-linux-android-
+      DEFCONFIG: ${{ github.event.inputs.defconfig || 'ranchu64_defconfig' }}
+      KERNEL_DIR: ${{ github.event.inputs.kernel_dir || 'common' }}
+      # 需要导出的其他环境变量
+      STOP_SHIP_TRACEPRINTK: 1
 
     steps:
       - name: Checkout source
@@ -52,12 +56,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-ccache-
 
-      - name: Download Clang
+      # 下载 Android GCC 4.9 工具链 (aarch64-linux-android-)
+      - name: Download GCC toolchain
         run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b master toolchain
+          echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
 
       - name: Add KernelSU (optional)
         run: |
+          cd $KERNEL_DIR
           curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -
         continue-on-error: true
 
@@ -70,24 +77,30 @@ jobs:
           echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
 
       - name: Build kernel
+        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
-          make O=out ARCH=arm64 $DEFCONFIG
+          make O=out ARCH=$ARCH $DEFCONFIG
           make -j$(nproc --all) \
             O=out \
-            ARCH=arm64 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            ARCH=$ARCH \
+            CROSS_COMPILE=$CROSS_COMPILE
 
-      - name: Copy kernel
+      - name: Copy kernel files
         run: |
-          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          # 根据 build.config 中的 FILES 列表复制所需文件
+          FILES="arch/arm64/boot/Image vmlinux System.map"
+          for file in $FILES; do
+            cp -v $KERNEL_DIR/out/$file AnyKernel3/ || echo "Warning: $file not found"
+          done
+          # 如果存在 dtb 或 dtbo，也可以额外复制（可选）
+          if [ -f $KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp -v $KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          fi
 
       - name: Build zip
         run: |
           cd AnyKernel3
-          zip -r9 $KERNEL_NAME.zip *
+          zip -r9 Kernel-${{ github.sha }}.zip *
 
       - name: Stop timer
         run: |
