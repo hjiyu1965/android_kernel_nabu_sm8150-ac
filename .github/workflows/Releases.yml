@@ -11,7 +11,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Build Kernel
       uses: mlm-games/simple-kernel-build-action@v1
@@ -24,7 +24,7 @@ jobs:
         ENABLE_CCACHE: 'true'
 
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: kernel-build
         path: 'kernel_source/flashable-anykernel.zip' # Always named flashable-anykernel.zip
