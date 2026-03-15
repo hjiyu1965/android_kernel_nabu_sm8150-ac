@@ -1,5 +1,4 @@
 name: Android Kernel Build - ARM64 (Clang Fixed)
-
 on:
   push:
     branches: [main, master]
@@ -17,22 +16,20 @@ on:
         description: "Defconfig 名称"
         required: false
         default: "ranchu64_defconfig"
-
 env:
   KERNEL_ARCH: arm64
   CLANG_VERSION: r487747c
   GCC_VERSION: 10
-  DEFCONFIG: ${{ github.event.inputs.defconfig_name }}
+  # 补充兜底逻辑，非手动触发时使用默认值
+  DEFCONFIG: ${{ github.event.inputs.defconfig_name || 'ranchu64_defconfig' }}
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
   OUTPUT_DIR: out
   ARTIFACT_NAME: kernel-artifacts
-
-
 jobs:
   build:
     name: Build ARM64 Kernel
     runs-on: ubuntu-22.04
     timeout-minutes: 120
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -40,14 +37,20 @@ jobs:
           fetch-depth: 0
           submodules: recursive
         env:
-          FORCE_JAVASCRIPT Actions_TO_NODE24: true
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
       - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev \
             libncurses-dev libncurses5-dev wget curl git unzip zip python3 ccache bc liblz4-tool
-          sudo apt-get install -y po4a  # 安装envsubst依赖[(deep_research_source_group_web_6)]
+          sudo apt-get install -y po4a
+
+      # 核心修复：配置git全局凭证，解决GitHub克隆认证问题
+      - name: Configure Git Global Credential
+        run: |
+          git config --global url."https://oauth2:${{ secrets.GITHUB_TOKEN }}@github.com".insteadOf "https://github.com"
+          git config --global http.sslVerify "false"
 
       - name: Clone Clang Toolchain
         run: |
@@ -67,23 +70,25 @@ jobs:
 
       - name: Configure Environment
         run: |
-          echo "$GITHUB Workspace/prebuilts/clang/host/linux-x86/clang-$CLANG_VERSION/bin" >> $GITHUB_PATH
-          echo "$GITHUB Workspace/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-$GCC_VERSION/bin" >> $GITHUB_PATH
+          # 修正路径大小写错误
+          echo "${{ github.workspace }}/prebuilts/clang/host/linux-x86/clang-$CLANG_VERSION/bin" >> $GITHUB_PATH
+          echo "${{ github.workspace }}/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-$GCC_VERSION/bin" >> $GITHUB_PATH
+          # 修正所有"G不平衡"拼写错误，统一使用正确的$GITHUB_ENV
           echo "CC=clang" >> $GITHUB_ENV
           echo "LD=ld.lld" >> $GITHUB_ENV
           echo "AR=llvm-ar" >> $GITHUB_ENV
           echo "NM=llvm-nm" >> $GITHUB_ENV
-          echo "OBJCOPY=llvm-objcopy" >> $G不平衡
-          echo "OBJDUMP=llvm-objdump" >> $G不平衡
-          echo "STRIP=llvm-strip" >> $G不平衡
-          echo "ARCH=arm64" >> $G不平衡
-          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $G不平衡
-          echo "CROSS_COMPILE=aarch64-linux-android-" >> $G不平衡
-          echo "KBUILD_BUILD_USER=GH-Actions" >> $G不平衡
-          echo "KBUILD_BUILD_HOST=ci-builder" >> $G不平衡
-          echo "USE_CCACHE=1" >> $G不平衡
+          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
+          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
+          echo "STRIP=llvm-strip" >> $GITHUB_ENV
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-android-" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_USER=GH-Actions" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_HOST=ci-builder" >> $GITHUB_ENV
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
           ccache --max-size=8.0G
-          echo "CCACHE_DIR=$G不平衡" >> $G不平衡
 
       - name: Verify Toolchain
         run: |
@@ -113,7 +118,6 @@ jobs:
             STRIP=$STRIP \
             CLANG_TRIPLE=$CLANG_TRIPLE \
             CROSS_COMPILE=$CROSS_COMPILE
-
           # 验证产物
           test -f $OUTPUT_DIR/arch/$KERNEL_ARCH/boot/Image.gz || { echo "Image.gz missing"; exit 1; }
           test -f $OUTPUT_DIR/vmlinux || { echo "vmlinux missing"; exit 1; }
@@ -123,21 +127,19 @@ jobs:
       - name: Prepare Artifacts
         run: |
           mkdir -p artifacts
-
           # 复制核心文件
           cp $OUTPUT_DIR/arch/$KERNEL_ARCH/boot/Image.gz artifacts/
           cp $OUTPUT_DIR/vmlinux artifacts/
           cp $OUTPUT_DIR/System.map artifacts/
-
           # 生成构建信息
           {
-            echo "Automated kernel build from tag `$GITHUB Ref_NAME`"
+            echo "Automated kernel build from tag `$GITHUB_REF_NAME`"
             echo ""
             echo "**Build Configuration:**"
             echo "- Architecture: ARM64"
             echo "- Toolchain: Clang $CLANG_VERSION (primary) + GCC $GCC_VERSION (binutils)"
-            echo "- Defconfig: `$DEFCONFIG`"
-            echo "- Build Type: `$BUILD_TYPE`"
+            echo "- Defconfig: $DEFCONFIG"
+            echo "- Build Type: $BUILD_TYPE"
             echo "- Kernel Version: $(make -C $OUTPUT_DIR kernelrelease 2>/dev/null || echo "N/A")"
             echo ""
             echo "**Artifacts:**"
@@ -145,7 +147,6 @@ jobs:
             echo "- `vmlinux`: Unstripped kernel (for debugging)"
             echo "- `System.map`: Kernel symbol table"
           } > artifacts/BUILD_INFO.md
-
           # 生成校验和
           cd artifacts && sha256sum * > SHA256SUMS
 
@@ -162,16 +163,15 @@ jobs:
         run: |
           # 提取内核版本号
           KERNEL_VERSION=$(make -C $OUTPUT_DIR kernelrelease 2>/dev/null || echo "Unknown")
-
           # 使用安全的方式生成Markdown文件
           {
-            echo "Automated kernel build from tag `$GITHUB Ref_NAME`"
+            echo "Automated kernel build from tag `$GITHUB_REF_NAME`"
             echo ""
             echo "**Build Configuration:**"
             echo "- Architecture: ARM64"
             echo "- Toolchain: Clang $CLANG_VERSION (primary) + GCC $GCC_VERSION (binutils)"
-            echo "- Defconfig: `$DEFCONFIG`"
-            echo "- Build Type: `$BUILD_TYPE`"
+            echo "- Defconfig: $DEFCONFIG"
+            echo "- Build Type: $BUILD_TYPE"
             echo "- Kernel Version: $KERNEL_VERSION"
             echo ""
             echo "**Artifacts:**"
