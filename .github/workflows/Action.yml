@@ -1,122 +1,190 @@
-name: Build Android Kernel (goldfish+arm64)
+name: Android Kernel Build - ARM64
 
 on:
   push:
     branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
     inputs:
-      defconfig:
-        description: 'Defconfig file'
+      build_type:
+        description: '构建类型'
         required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      defconfig_name:
+        description: 'Defconfig 名称 (默认: ranchu64_defconfig)'
+        required: false
         default: 'ranchu64_defconfig'
-      kernel_dir:
-        description: 'Kernel source subdirectory'
-        required: true
-        default: 'common'
+
+env:
+  # 从 build.config.aarch64.txt 提取的关键配置
+  KERNEL_ARCH: arm64
+  CLANG_TRIPLE: aarch64-linux-gnu-
+  CROSS_COMPILE_PREFIX: aarch64-linux-android-
+  GCC_VERSION: 4.9
+  DEFCONFIG: ${{ github.event.inputs.defconfig_name || 'ranchu64_defconfig' }}
+  OUTPUT_DIR: out
+  ARTIFACT_NAME: kernel-artifacts-${{ github.run_number }}-${{ github.sha }}
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    env:
-      ARCH: arm64
-      CROSS_COMPILE: aarch64-linux-android-
-      DEFCONFIG: ${{ github.event.inputs.defconfig || 'ranchu64_defconfig' }}
-      KERNEL_DIR: ${{ github.event.inputs.kernel_dir || 'common' }}
-      # 需要导出的其他环境变量
-      STOP_SHIP_TRACEPRINTK: 1
+    name: Build ARM64 Kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout source
+      # =============== 1. 检出代码 ===============
+      - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            bc \
-            bison \
-            build-essential \
-            ccache \
-            curl \
-            flex \
-            git \
-            libssl-dev \
-            libncurses5-dev \
-            lzop \
-            python3 \
-            unzip \
-            wget \
-            zip
-
-      - name: Setup ccache
-        uses: actions/cache@v4
         with:
-          path: ~/.ccache
-          key: ${{ runner.os }}-ccache-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-ccache-
+          fetch-depth: 0
+          submodules: recursive
 
-      # 下载 Android GCC 4.9 工具链 (aarch64-linux-android-)
-      - name: Download GCC toolchain
+      # =============== 2. 安装系统依赖 ===============
+      - name: Install Build Dependencies
         run: |
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 -b master toolchain
-          echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            flex \
+            bison \
+            libssl-dev \
+            libelf-dev \
+            libncurses-dev \
+            libncurses5-dev \
+            wget \
+            curl \
+            git \
+            unzip \
+            zip \
+            python3 \
+            python3-pip \
+            ccache
 
-      - name: Add KernelSU (optional)
+      # =============== 3. 下载 GCC 4.9 工具链 (关键步骤) ===============
+      - name: Clone GCC 4.9 Toolchain
         run: |
-          cd $KERNEL_DIR
-          curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -
-        continue-on-error: true
+          mkdir -p prebuilts/gcc/linux-x86/aarch64
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
+            prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-${GCC_VERSION}
+          # 验证工具链
+          ls -lh prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-${GCC_VERSION}/bin/
+          echo "Toolchain installed successfully"
 
-      - name: Clone AnyKernel3
+      # =============== 4. 设置环境变量 ===============
+      - name: Configure Build Environment
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          # 设置 PATH (关键：使 make 能找到交叉编译工具)
+          echo "${{ github.workspace }}/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-${GCC_VERSION}/bin" >> $GITHUB_PATH
+          
+          # 设置编译参数 (与 build.config.aarch64.txt 严格对应)
+          echo "ARCH=${KERNEL_ARCH}" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=${CLANG_TRIPLE}" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=${CROSS_COMPILE_PREFIX}" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_USER=GitHubActions" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_HOST=ci-builder" >> $GITHUB_ENV
+          
+          # 启用 ccache (显著加速重复编译)
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          ccache --max-size=5.0G
+          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
 
-      - name: Start timer
+      # =============== 5. 验证工具链 ===============
+      - name: Verify Toolchain Availability
         run: |
-          echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
+          which ${CROSS_COMPILE_PREFIX}gcc
+          ${CROSS_COMPILE_PREFIX}gcc --version | head -n 3
+          echo "Toolchain verified: ${CROSS_COMPILE_PREFIX}gcc"
 
-      - name: Build kernel
-        working-directory: ${{ env.KERNEL_DIR }}
+      # =============== 6. 内核配置与编译 ===============
+      - name: Configure Kernel
         run: |
-          make O=out ARCH=$ARCH $DEFCONFIG
-          make -j$(nproc --all) \
-            O=out \
-            ARCH=$ARCH \
-            CROSS_COMPILE=$CROSS_COMPILE
-
-      - name: Copy kernel files
-        run: |
-          # 根据 build.config 中的 FILES 列表复制所需文件
-          FILES="arch/arm64/boot/Image vmlinux System.map"
-          for file in $FILES; do
-            cp -v $KERNEL_DIR/out/$file AnyKernel3/ || echo "Warning: $file not found"
-          done
-          # 如果存在 dtb 或 dtbo，也可以额外复制（可选）
-          if [ -f $KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp -v $KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          make O=${OUTPUT_DIR} ${DEFCONFIG}
+          # 可选：根据构建类型调整配置
+          if [ "${{ github.event.inputs.build_type }}" == "debug" ]; then
+            scripts/config --file ${OUTPUT_DIR}/.config -e DEBUG_KERNEL -e DEBUG_INFO
+            make O=${OUTPUT_DIR} olddefconfig
+            echo "🔧 Debug build: Enabled kernel debug options"
           fi
 
-      - name: Build zip
+      - name: Build Kernel
         run: |
-          cd AnyKernel3
-          zip -r9 Kernel-${{ github.sha }}.zip *
+          echo "Starting kernel build with:"
+          echo "  ARCH=${ARCH}"
+          echo "  CROSS_COMPILE=${CROSS_COMPILE}"
+          echo "  Output directory: ${OUTPUT_DIR}"
+          
+          # 执行编译 (使用所有可用核心)
+          make -j$(nproc) O=${OUTPUT_DIR} \
+            ARCH=${ARCH} \
+            CROSS_COMPILE=${CROSS_COMPILE}
+          
+          # 验证关键产物是否存在
+          if [ ! -f ${OUTPUT_DIR}/arch/${KERNEL_ARCH}/boot/Image.gz ]; then
+            echo "❌ ERROR: Image.gz not found!"
+            ls -lh ${OUTPUT_DIR}/arch/${KERNEL_ARCH}/boot/ || true
+            exit 1
+          fi
+          if [ ! -f ${OUTPUT_DIR}/vmlinux ]; then
+            echo "❌ ERROR: vmlinux not found!"
+            exit 1
+          fi
+          echo "✅ Kernel build completed successfully"
 
-      - name: Stop timer
+      # =============== 7. 收集构建产物 ===============
+      - name: Prepare Artifacts
         run: |
-          echo "BUILD_END=$(date +%s)" >> $GITHUB_ENV
+          mkdir -p artifacts
+          
+          # 复制 build.config.aarch64.txt 指定的关键文件
+          cp ${OUTPUT_DIR}/arch/${KERNEL_ARCH}/boot/Image.gz artifacts/
+          cp ${OUTPUT_DIR}/vmlinux artifacts/
+          cp ${OUTPUT_DIR}/System.map artifacts/
+          
+          # 附加有用信息
+          echo "Build completed at $(date)" > artifacts/BUILD_INFO.txt
+          echo "Commit: ${{ github.sha }}" >> artifacts/BUILD_INFO.txt
+          echo "Defconfig: ${DEFCONFIG}" >> artifacts/BUILD_INFO.txt
+          echo "Build type: ${{ github.event.inputs.build_type || 'release' }}" >> artifacts/BUILD_INFO.txt
+          make -C ${OUTPUT_DIR} kernelrelease >> artifacts/BUILD_INFO.txt
+          
+          # 创建校验和
+          cd artifacts && sha256sum * > SHA256SUMS
 
-      - name: Upload Artifact
+      # =============== 8. 上传产物到 GitHub ===============
+      - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel
-          path: AnyKernel3/*.zip
+          name: ${{ env.ARTIFACT_NAME }}
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      # =============== 9. (可选) 发布到 Release ===============
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
         with:
-          tag_name: build-${{ github.run_number }}
-          name: Kernel Build
-          files: AnyKernel3/*.zip
+          files: artifacts/*
+          tag_name: ${{ github.ref_name }}
+          name: "Kernel Release ${{ github.ref_name }}"
+          body: |
+            Automated kernel build from tag `${{ github.ref_name }}`
+            - Architecture: ARM64
+            - Toolchain: GCC ${GCC_VERSION}
+            - Defconfig: `${{ env.DEFCONFIG }}`
+            - Build type: `${{ github.event.inputs.build_type || 'release' }}`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # =============== 10. 清理 (节省 runner 空间) ===============
+      - name: Cleanup Workspace
+        if: always()
+        run: |
+          rm -rf ${OUTPUT_DIR} prebuilts .ccache
+          echo "Workspace cleaned"
