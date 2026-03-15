@@ -1,0 +1,90 @@
+steps:
+
+- name: Checkout source
+  uses: actions/checkout@v4
+
+- name: Install dependencies
+  run: |
+    sudo apt update
+    sudo apt install -y \
+    bc \
+    bison \
+    build-essential \
+    ccache \
+    curl \
+    flex \
+    git \
+    libssl-dev \
+    libncurses5-dev \
+    lzop \
+    python3 \
+    unzip \
+    wget \
+    zip
+
+- name: Setup ccache
+  uses: actions/cache@v4
+  with:
+    path: ~/.ccache
+    key: ${{ runner.os }}-ccache-${{ github.sha }}
+    restore-keys: |
+      ${{ runner.os }}-ccache-
+
+- name: Download Clang
+  run: |
+    git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+
+- name: Add KernelSU (optional)
+  run: |
+    curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -
+  continue-on-error: true
+
+- name: Clone AnyKernel3
+  run: |
+    git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+
+- name: Start timer
+  run: |
+    echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
+
+- name: Build kernel
+  run: |
+    export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+
+    make O=out ARCH=arm64 $DEFCONFIG
+
+    make -j$(nproc --all) \
+    O=out \
+    ARCH=arm64 \
+    CC=clang \
+    CROSS_COMPILE=aarch64-linux-gnu- \
+    CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+- name: Copy kernel
+  run: |
+    cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+
+- name: Build zip
+  run: |
+    cd AnyKernel3
+    zip -r9 $KERNEL_NAME.zip *
+
+- name: Stop timer
+  run: |
+    echo "BUILD_END=$(date +%s)" >> $GITHUB_ENV
+
+- name: Upload Artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: Kernel
+    path: AnyKernel3/*.zip
+
+- name: Create Release
+  uses: softprops/action-gh-release@v2
+  with:
+    tag_name: build-${{ github.run_number }}
+    name: Kernel Build
+    files: AnyKernel3/*.zip
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
