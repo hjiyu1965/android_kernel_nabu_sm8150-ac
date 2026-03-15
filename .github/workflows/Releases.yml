@@ -1,35 +1,30 @@
-name: Releases
+name: Build Kernel
 
 on:
   push:
-    tags:
+    branches: [ main ]
 
 jobs:
   build:
+
     runs-on: ubuntu-latest
+
     steps:
-    - name: Checkout kernel source
-      uses: actions/checkout@v2
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-    - name: Checkout zipper
-      uses: actions/checkout@v2
+    - name: Build Kernel
+      uses: mlm-games/simple-kernel-build-action@v1
       with:
-        repository: lemniskett/AnyKernel3
-        path: zipper
+        KERNEL_CLONE_CMD: 'git clone https://github.com/hjiyu1965/android_kernel_nabu_sm8150-ac -b main' # PSA: directory and depth=1 are added automatically!
+        KERNEL_CONFIG: 'vendor/sm8150-perf_defconfig'
+        ARCH: 'arm64'
+        TOOLCHAIN_CLONE_CMD: 'git clone https://github.com/djb77/aarch64-linux-android-4.9 ./toolchain/gcc'
+        ENABLE_KSU: 'true'
+        ENABLE_CCACHE: 'true'
 
-    - name: Android kernel build
-      uses: lemniskett/android-kernel-actions@master
-      id: build
-      env:
-        NAME: Dark-Ages-Último
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
       with:
-        arch: arm64
-        compiler: gcc/10
-        defconfig: ranchu64_defconfig
-        image: Image.gz-dtb
-
-    - name: Release build
-      uses: ncipollo/release-action@v1
-      with:
-        artifacts: ${{ steps.build.outputs.outfile }}
-        token: ${{ secrets.GITHUB_TOKEN }}
+        name: kernel-build
+        path: 'kernel_source/flashable-anykernel.zip' # Always named flashable-anykernel.zip
