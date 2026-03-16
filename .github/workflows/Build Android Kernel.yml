@@ -14,31 +14,38 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2  # 使用 checkout 的最新稳定版
-
-      - name: Set up JDK
-        uses: actions/setup-java@v3  # 使用 setup-java 的最新稳定版
-        with:
-          java-version: '11'  # 根据需要选择合适的 JDK 版本
+        uses: actions/checkout@v3  # 使用最新的 checkout 版本
 
       - name: Install required packages
         run: |
           sudo apt-get update
           sudo apt-get install -y git python-is-python3 bison flex libssl-dev \
-            make gcc g++ lzop libc6-dev unzip
+            make gcc g++ lzop libc6-dev unzip curl
+
+      - name: Set up JAVA_HOME
+        run: |
+          sudo apt-get install -y openjdk-11-jdk
+          echo "JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64" >> $GITHUB_ENV
+          echo "PATH=\$JAVA_HOME/bin:\$PATH" >> $GITHUB_ENV
+
+      - name: Download and set up cross compiler
+        run: |
+          curl -O https://developer.arm.com/-/media/Files/downloads/gnu-rm/10.3.1/gcc-arm-none-eabi-10.3-2021.07-x86_64-linux.tar.bz2
+          tar -xjf gcc-arm-none-eabi-10.3-2021.07-x86_64-linux.tar.bz2
+          echo "$PWD/gcc-arm-none-eabi-10.3-2021.07-x86_64-linux/bin" >> $GITHUB_PATH
 
       - name: Configure Kernel
         run: |
           cd path/to/your/kernel/source  # 替换成实际路径
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vendor/sm8150-perf_defconfig  # 使用你指定的 defconfig
+          make ARCH=arm64 CROSS_COMPILE=arm-none-eabi- vendor/sm8150-perf_defconfig  # 使用你指定的 defconfig
 
       - name: Build Kernel
         run: |
           cd path/to/your/kernel/source  # 替换成实际路径
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)  # 并行构建
+          make ARCH=arm64 CROSS_COMPILE=arm-none-eabi- -j$(nproc)  # 并行构建
 
       - name: Upload Kernel Artifacts
-        uses: actions/upload-artifact@v2  # 使用较稳定的 v2 版本
+        uses: actions/upload-artifact@v3  # 使用最新的 upload-artifact
         with:
           name: android-kernel
           path: path/to/your/kernel/source/arch/arm64/boot/Image.gz  # 替换成实际内核镜像路径
