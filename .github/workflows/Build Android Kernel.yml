@@ -1,51 +1,239 @@
 name: Build Android Kernel
-
+# 触发规则：推送到main/kernel分支、PR、手动触发
 on:
   push:
-    branches:
-      - main  # 触发条件，针对主分支的推送
+    branches: [ "main", "kernel-*" ]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
-    branches:
-      - main  # 触发条件，针对主分支的合并请求
+    branches: [ "main", "kernel-*" ]
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "内核defconfig文件名（如vendor/sm8150_defconfig）"
+        required: true
+        default: "vendor/sm8150_defconfig"
+      clang_version:
+        description: "Clang编译器版本"
+        required: true
+        default: "r450784d"
+      arch:
+        description: "目标架构"
+        required: true
+        default: "arm64"
+        options: [ "arm64", "arm" ]
+      enable_ccache:
+        description: "启用ccache编译加速"
+        type: boolean
+        required: true
+        default: true
+      build_anykernel:
+        description: "打包AnyKernel3刷入包"
+        type: boolean
+        required: true
+        default: true
+      kernel_image_name:
+        description: "内核镜像文件名（非GKI用Image.gz-dtb，GKI用Image）"
+        required: true
+        default: "Image.gz-dtb"
+
+# 全局环境变量（按需修改）
+env:
+  KERNEL_OUT: ${{ github.workspace }}/out
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CLANG_URL: "https://dl.google.com/android/repository/clang-${{ inputs.clang_version || 'r450784d' }}-linux-x86.tar.bz2"
+  GCC_AARCH64_URL: "https://releases.linaro.org/components/toolchain/binaries/latest-7/aarch64-linux-gnu/gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu.tar.xz"
+  GCC_ARM_URL: "https://releases.linaro.org/components/toolchain/binaries/latest-7/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz"
+  ANYKERNEL_REPO: "https://github.com/osm0sis/AnyKernel3.git"
 
 jobs:
-  build:
-    runs-on: ubuntu-latest  # 运行环境
+  build-kernel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2  # 使用最新的 checkout 版本
+      - name: 1. 检出内核源码
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Install required packages
+      - name: 2. 安装编译依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y git python-is-python3 bison flex libssl-dev \
-            make gcc g++ lzop libc6-dev unzip curl
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libncurses-dev \
+            zip curl wget git python3 python3-pip zstd liblz4-tool \
+            ccache gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
+            libc6-dev-i386 lib32stdc++6
+          sudo ln -sf /usr/bin/python3 /usr/bin/python
+          python --version
+          gcc --version
 
-      - name: Set up JAVA_HOME
-        run: |
-          sudo apt-get install -y openjdk-11-jdk
-          echo "JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64" >> $GITHUB_ENV
-          echo "PATH=\$JAVA_HOME/bin:\$PATH" >> $GITHUB_ENV
-
-      - name: Download and set up cross compiler
-        run: |
-          curl -O https://developer.arm.com/-/media/Files/downloads/gnu-rm/10.3.1/gcc-arm-none-eabi-10.3-2021.07-x86_64-linux.tar.bz2
-          tar -xjf gcc-arm-none-eabi-10.3-2021.07-x86_64-linux.tar.bz2
-          echo "$PWD/gcc-arm-none-eabi-10.3-2021.07-x86_64-linux/bin" >> $GITHUB_PATH
-
-      - name: Configure Kernel
-        run: |
-          cd path/to/your/kernel/source  # 替换成实际路径
-          make ARCH=arm64 CROSS_COMPILE=arm-none-eabi- vendor/sm8150-perf_defconfig  # 使用你指定的 defconfig
-
-      - name: Build Kernel
-        run: |
-          cd path/to/your/kernel/source  # 替换成实际路径
-          make ARCH=arm64 CROSS_COMPILE=arm-none-eabi- -j$(nproc)  # 并行构建
-
-      - name: Upload Kernel Artifacts
-        uses: actions/upload-artifact@v4 # 使用 v2 版本
+      - name: 3. 配置ccache缓存
+        if: ${{ inputs.enable_ccache || true }}
+        uses: actions/cache@v4
         with:
-          name: android-kernel
-          path: path/to/your/kernel/source/arch/arm64/boot/Image.gz  # 替换成实际内核镜像路径
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ inputs.arch || 'arm64' }}-${{ inputs.clang_version || 'r450784d' }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ inputs.arch || 'arm64' }}-${{ inputs.clang_version || 'r450784d' }}-
+
+      - name: 4. 下载并配置编译工具链
+        run: |
+          set -e
+          mkdir -p toolchain/clang toolchain/gcc-aarch64 toolchain/gcc-arm
+          
+          # 下载Clang编译器
+          echo "下载 Clang ${{ inputs.clang_version || 'r450784d' }}"
+          wget -q ${{ env.CLANG_URL }} -O clang.tar.bz2
+          tar -xf clang.tar.bz2 -C toolchain/clang --strip-components=1
+          
+          # 下载aarch64交叉编译GCC
+          echo "下载 aarch64-linux-gnu 工具链"
+          wget -q ${{ env.GCC_AARCH64_URL }} -O gcc-aarch64.tar.xz
+          tar -xf gcc-aarch64.tar.xz -C toolchain/gcc-aarch64 --strip-components=1
+          
+          # 下载32位arm兼容工具链
+          echo "下载 arm-linux-gnueabihf 工具链"
+          wget -q ${{ env.GCC_ARM_URL }} -O gcc-arm.tar.xz
+          tar -xf gcc-arm.tar.xz -C toolchain/gcc-arm --strip-components=1
+          
+          # 配置环境变量
+          echo "TOOLCHAIN_PATH=${{ github.workspace }}/toolchain/clang/bin:${{ github.workspace }}/toolchain/gcc-aarch64/bin:${{ github.workspace }}/toolchain/gcc-arm/bin" >> $GITHUB_ENV
+          
+          # 配置ccache
+          if [ "${{ inputs.enable_ccache || true }}" = "true" ]; then
+            echo "启用ccache"
+            ccache -M 10G
+            ccache -o compression=true
+            ccache -z
+            echo "CC=ccache clang" >> $GITHUB_ENV
+            echo "CXX=ccache clang++" >> $GITHUB_ENV
+          else
+            echo "CC=clang" >> $GITHUB_ENV
+            echo "CXX=clang++" >> $GITHUB_ENV
+          fi
+
+      - name: 5. 配置内核
+        run: |
+          set -e
+          export PATH=${{ env.TOOLCHAIN_PATH }}:$PATH
+          export ARCH=${{ inputs.arch || 'arm64' }}
+          export SUBARCH=${{ inputs.arch || 'arm64' }}
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_COMPAT=arm-linux-gnueabihf-
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          
+          # 生成defconfig配置
+          echo "加载配置: ${{ inputs.defconfig || 'vendor/sm8150_defconfig' }}"
+          make O=${{ env.KERNEL_OUT }} ${{ inputs.defconfig || 'vendor/sm8150_defconfig' }}
+          
+          # 可选：自定义配置补丁（取消注释启用，把patch文件放到仓库的patches目录）
+          # echo "应用自定义补丁"
+          # for patch in ${{ github.workspace }}/patches/*.patch; do
+          #   if [ -f "$patch" ]; then
+          #     patch -p1 < "$patch"
+          #   fi
+          # done
+          
+          # 可选：保存完整配置到日志
+          make O=${{ env.KERNEL_OUT }} savedefconfig
+          cat ${{ env.KERNEL_OUT }}/.config
+
+      - name: 6. 编译内核
+        run: |
+          set -e
+          export PATH=${{ env.TOOLCHAIN_PATH }}:$PATH
+          export ARCH=${{ inputs.arch || 'arm64' }}
+          export SUBARCH=${{ inputs.arch || 'arm64' }}
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_COMPAT=arm-linux-gnueabihf-
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          
+          # 并行编译（使用CPU核心数最大化速度）
+          echo "开始编译内核，并行数: $(nproc)"
+          make -j$(nproc) O=${{ env.KERNEL_OUT }} \
+            ${{ inputs.kernel_image_name || 'Image.gz-dtb' }} \
+            modules dtbs
+          
+          # 安装内核模块
+          make -j$(nproc) O=${{ env.KERNEL_OUT }} \
+            modules_install INSTALL_MOD_PATH=${{ env.KERNEL_OUT }}/modules
+          
+          # 显示编译结果
+          echo "编译完成，内核镜像:"
+          ls -la ${{ env.KERNEL_OUT }}/arch/${{ inputs.arch || 'arm64' }}/boot/${{ inputs.kernel_image_name || 'Image.gz-dtb' }}
+          echo "内核版本:"
+          ${{ env.KERNEL_OUT }}/scripts/extract-ikconfig ${{ env.KERNEL_OUT }}/arch/${{ inputs.arch || 'arm64' }}/boot/${{ inputs.kernel_image_name || 'Image.gz-dtb' }} | grep -E "Linux version|CONFIG_LOCALVERSION"
+          
+          # 显示ccache统计
+          if [ "${{ inputs.enable_ccache || true }}" = "true" ]; then
+            ccache -s
+          fi
+
+      - name: 7. 整理编译产物
+        run: |
+          set -e
+          mkdir -p ${{ env.KERNEL_OUT }}/release
+          
+          # 复制核心文件
+          cp ${{ env.KERNEL_OUT }}/arch/${{ inputs.arch || 'arm64' }}/boot/${{ inputs.kernel_image_name || 'Image.gz-dtb' }} ${{ env.KERNEL_OUT }}/release/
+          cp ${{ env.KERNEL_OUT }}/.config ${{ env.KERNEL_OUT }}/release/kernel_config
+          cp ${{ env.KERNEL_OUT }}/defconfig ${{ env.KERNEL_OUT }}/release/
+          
+          # 打包模块
+          if [ -d "${{ env.KERNEL_OUT }}/modules" ]; then
+            tar -czf ${{ env.KERNEL_OUT }}/release/kernel_modules.tar.gz -C ${{ env.KERNEL_OUT }}/modules .
+          fi
+          
+          # 打包dtb文件
+          if [ -d "${{ env.KERNEL_OUT }}/arch/${{ inputs.arch || 'arm64' }}/boot/dts" ]; then
+            tar -czf ${{ env.KERNEL_OUT }}/release/dtbs.tar.gz -C ${{ env.KERNEL_OUT }}/arch/${{ inputs.arch || 'arm64' }}/boot/dts .
+          fi
+          
+          echo "产物整理完成:"
+          ls -la ${{ env.KERNEL_OUT }}/release/
+
+      - name: 8. 打包AnyKernel3刷入包
+        if: ${{ inputs.build_anykernel || true }}
+        run: |
+          set -e
+          git clone ${{ env.ANYKERNEL_REPO }} AnyKernel3
+          
+          # 复制内核镜像到AnyKernel3
+          cp ${{ env.KERNEL_OUT }}/arch/${{ inputs.arch || 'arm64' }}/boot/${{ inputs.kernel_image_name || 'Image.gz-dtb' }} AnyKernel3/
+          
+          # 可选：复制你设备专属的anykernel.sh、banner等配置到AnyKernel3
+          # 建议把你的设备配置放到仓库的anykernel目录，取消下面注释启用
+          # cp -r ${{ github.workspace }}/anykernel/* AnyKernel3/
+          
+          # 打包zip
+          cd AnyKernel3
+          zip -r9 ${{ env.KERNEL_OUT }}/release/AnyKernel3-Kernel.zip *
+          cd ..
+          
+          echo "AnyKernel3包打包完成"
+          ls -la ${{ env.KERNEL_OUT }}/release/AnyKernel3-Kernel.zip
+
+      - name: 9. 上传编译产物到Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-kernel-build-${{ github.sha }}
+          path: ${{ env.KERNEL_OUT }}/release/
+          retention-days: 30
+
