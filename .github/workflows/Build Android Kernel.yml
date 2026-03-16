@@ -1,0 +1,44 @@
+name: Build Android Kernel
+
+on:
+  push:
+    branches:
+      - main  # 触发条件，针对主分支的推送
+  pull_request:
+    branches:
+      - main  # 触发条件，针对主分支的合并请求
+
+jobs:
+  build:
+    runs-on: ubuntu-latest  # 运行环境
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up JDK
+        uses: actions/setup-java@v1
+        with:
+          java-version: '11'  # 根据需要选择合适的 JDK 版本
+
+      - name: Install required packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python-is-python3 bison flex libssl-dev \
+            make gcc g++ lzop libc6-dev unzip
+
+      - name: Configure Kernel
+        run: |
+          cd path/to/your/kernel/source  # 替换成实际路径
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vendor/sm8150-perf_defconfig  # 使用你指定的 defconfig
+
+      - name: Build Kernel
+        run: |
+          cd path/to/your/kernel/source  # 替换成实际路径
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)  # 并行构建
+
+      - name: Upload Kernel Artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: android-kernel
+          path: path/to/your/kernel/source/arch/arm64/boot/Image.gz   # 替换成实际内核镜像路径
