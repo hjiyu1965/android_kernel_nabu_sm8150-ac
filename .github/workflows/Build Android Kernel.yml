@@ -38,7 +38,7 @@ jobs:
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)  # 并行构建
 
       - name: Upload Kernel Artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3  # 更新到 v3
         with:
           name: android-kernel
           path: path/to/your/kernel/source/arch/arm64/boot/Image.gz   # 替换成实际内核镜像路径
