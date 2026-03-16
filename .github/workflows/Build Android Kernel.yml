@@ -3,23 +3,23 @@ name: Build Android Kernel
 on:
   push:
     branches:
-      - main  # Trigger on push to the main branch
+      - main  # 触发条件，针对主分支的推送
   pull_request:
     branches:
-      - main  # Trigger on pull request to the main branch
+      - main  # 触发条件，针对主分支的合并请求
 
 jobs:
   build:
-    runs-on: ubuntu-latest  # Runner environment
+    runs-on: ubuntu-latest  # 运行环境
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3  # Updated to the latest version
+        uses: actions/checkout@v2  # 使用 checkout 的最新稳定版
 
       - name: Set up JDK
-        uses: actions/setup-java@v3  # Update to the latest version
+        uses: actions/setup-java@v3  # 使用 setup-java 的最新稳定版
         with:
-          java-version: '11'  # Update this as necessary
+          java-version: '11'  # 根据需要选择合适的 JDK 版本
 
       - name: Install required packages
         run: |
@@ -29,16 +29,16 @@ jobs:
 
       - name: Configure Kernel
         run: |
-          cd path/to/your/kernel/source  # Replace with actual path
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vendor/sm8150-perf_defconfig  # Use your specified defconfig
+          cd path/to/your/kernel/source  # 替换成实际路径
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vendor/sm8150-perf_defconfig  # 使用你指定的 defconfig
 
       - name: Build Kernel
         run: |
-          cd path/to/your/kernel/source  # Replace with actual path
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)  # Build in parallel
+          cd path/to/your/kernel/source  # 替换成实际路径
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)  # 并行构建
 
       - name: Upload Kernel Artifacts
-        uses: actions/upload-artifact@v3  # Use the latest version
+        uses: actions/upload-artifact@v2  # 使用较稳定的 v2 版本
         with:
           name: android-kernel
-          path: path/to/your/kernel/source/arch/arm64/boot/Image.gz  # Update to the actual kernel image path
+          path: path/to/your/kernel/source/arch/arm64/boot/Image.gz  # 替换成实际内核镜像路径
